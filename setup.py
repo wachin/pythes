@@ -9,5 +9,6 @@ setup(
     description='PyThes is a Python class providing methods to search Hunspell thesaurus for words and related '
                 'information on part of speech, meanings and synonyms.',
     packages=['pythes'],
+    python_requires='>=3.10',
     install_requires=[],
 )

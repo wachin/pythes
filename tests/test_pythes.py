@@ -3,7 +3,17 @@ import unicodedata
 
 import pytest
 
-from pythes import PyThes, PyThesIndexWarning
+from pythes import (
+    ExcLookupMissmatch,
+    LookupMismatchError,
+    Mean,
+    MalformedDataError,
+    PyThes,
+    PyThesError,
+    PyThesIndexWarning,
+    ThesaurusEntry,
+    ThesaurusMeaning,
+)
 
 
 def _write_thesaurus(
@@ -237,3 +247,61 @@ def test_invalid_cache_size_is_rejected(tmp_path, cache_size):
 
     with pytest.raises((TypeError, ValueError)):
         PyThes(path, cache_size=cache_size)
+
+
+def test_typed_paths_preserve_legacy_string_attributes(tmp_path):
+    path = _write_thesaurus(tmp_path / 'th_test')
+    thesaurus = PyThes(path)
+
+    assert thesaurus.data_path == path.resolve()
+    assert thesaurus.index_path == path.with_suffix('.idx').resolve()
+    assert thesaurus.dat_path == str(thesaurus.data_path)
+    assert thesaurus.idx_path == str(thesaurus.index_path)
+
+    path.with_suffix('.idx').unlink()
+    without_index = PyThes(path)
+    assert without_index.index_path is None
+    assert without_index.idx_path == ''
+
+
+def test_structured_results_keep_tuple_compatibility(tmp_path):
+    path = _write_thesaurus(tmp_path / 'th_test')
+
+    result = PyThes(path).lookup('árbol')
+
+    assert isinstance(result, ThesaurusEntry)
+    assert isinstance(result.meanings[0], ThesaurusMeaning)
+    assert Mean is ThesaurusMeaning
+    assert result.meanings == result.mean_tuple
+    assert result.meanings[0].part_of_speech == result.meanings[0].pos
+    assert result.meanings[0].meaning == result.meanings[0].main
+    assert result.meanings[0].synonyms == result.meanings[0].syn_tuple
+    word, meanings = result
+    assert word == 'árbol'
+    assert meanings == result.mean_tuple
+
+
+def test_public_exception_alias_has_structured_context(tmp_path):
+    path = _write_thesaurus(tmp_path / 'th_test')
+    thesaurus = PyThes(path)
+
+    with pytest.raises(LookupMismatchError) as caught:
+        thesaurus.validate_index({'árbol': 0})
+
+    assert ExcLookupMissmatch is LookupMismatchError
+    assert isinstance(caught.value, PyThesError)
+    assert caught.value.path == path.resolve()
+    assert caught.value.offset == 0
+
+
+def test_truncated_meaning_raises_structured_data_error(tmp_path):
+    path = _write_thesaurus(tmp_path / 'th_test')
+    thesaurus = PyThes(path)
+    header = path.read_bytes().splitlines(keepends=True)[0]
+    path.write_bytes(header + 'árbol|1\n'.encode('UTF-8'))
+
+    with pytest.raises(MalformedDataError) as caught:
+        thesaurus.lookup('árbol')
+
+    assert caught.value.path == path.resolve()
+    assert caught.value.offset == len(header)

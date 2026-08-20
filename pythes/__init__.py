@@ -1,3 +1,35 @@
-from .pythes import PyThes, PyThesIndexWarning
+from .pythes import (
+    ExcIndexLinesCount,
+    ExcLookupMissmatch,
+    ExcMalformedData,
+    ExcMalformedIndex,
+    ExcPyThes,
+    IndexLineCountError,
+    LookupMismatchError,
+    MalformedDataError,
+    MalformedIndexError,
+    Mean,
+    PyThes,
+    PyThesError,
+    PyThesIndexWarning,
+    ThesaurusEntry,
+    ThesaurusMeaning,
+)
 
-__all__ = ['PyThes', 'PyThesIndexWarning']
+__all__ = [
+    'ExcIndexLinesCount',
+    'ExcLookupMissmatch',
+    'ExcMalformedData',
+    'ExcMalformedIndex',
+    'ExcPyThes',
+    'IndexLineCountError',
+    'LookupMismatchError',
+    'MalformedDataError',
+    'MalformedIndexError',
+    'Mean',
+    'PyThes',
+    'PyThesError',
+    'PyThesIndexWarning',
+    'ThesaurusEntry',
+    'ThesaurusMeaning',
+]

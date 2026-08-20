@@ -62,51 +62,95 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 '''
-from collections import namedtuple, OrderedDict
+from __future__ import annotations
+
+from collections import OrderedDict
 import os
-from os.path import abspath, splitext, isfile
+from os.path import abspath
 from pathlib import Path
 import tempfile
 from threading import RLock
+from typing import Dict, NamedTuple, Optional, Tuple, Union
 import unicodedata
 import warnings
 
 
-# The thesaurus entry of a word consists of:
-# word       - the word itself
-# mean_tuple - the means related to the word
-ThesaurusEntry = namedtuple('ThesaurusEntry', 'word mean_tuple')
-
-# each mean consists of:
-# pos       - part of speech or other meaning specific description
-# main      - main mean
-# syn_tuple - the synonyms related to the mean
-Mean = namedtuple('Mean', 'pos main syn_tuple')
+PathInput = Union[str, os.PathLike]
 
 
-class ExcPyThes(Exception):
-    '''Generic exception'''
-    pass
+class ThesaurusMeaning(NamedTuple):
+    '''One meaning, its part of speech, and related synonyms.'''
+
+    pos: str
+    main: str
+    syn_tuple: Tuple[str, ...]
+
+    @property
+    def part_of_speech(self) -> str:
+        return self.pos
+
+    @property
+    def meaning(self) -> str:
+        return self.main
+
+    @property
+    def synonyms(self) -> Tuple[str, ...]:
+        return self.syn_tuple
 
 
-class ExcIndexLinesCount(ExcPyThes):
-    '''Read line count doesn't match with expected'''
-    pass
+Mean = ThesaurusMeaning
 
 
-class ExcLookupMissmatch(ExcPyThes):
-    '''Entry found at byte offset into data file does not match lookup word'''
-    pass
+class ThesaurusEntry(NamedTuple):
+    '''A normalized lookup word and all of its thesaurus meanings.'''
+
+    word: str
+    mean_tuple: Tuple[ThesaurusMeaning, ...]
+
+    @property
+    def meanings(self) -> Tuple[ThesaurusMeaning, ...]:
+        return self.mean_tuple
 
 
-class ExcMalformedIndex(ExcPyThes):
-    '''A thesaurus index line is missing or invalid'''
-    pass
+class PyThesError(Exception):
+    '''Base class for structured PyThes data and index errors.'''
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        path: Optional[PathInput] = None,
+        line_number: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> None:
+        super().__init__(message)
+        self.path = Path(abspath(Path(path).expanduser())) if path is not None else None
+        self.line_number = line_number
+        self.offset = offset
 
 
-class ExcMalformedData(ExcPyThes):
-    '''A thesaurus data entry is incomplete or invalid'''
-    pass
+class IndexLineCountError(PyThesError):
+    '''The declared index entry count does not match its contents.'''
+
+
+class LookupMismatchError(PyThesError):
+    '''An index byte offset does not point to the requested data entry.'''
+
+
+class MalformedIndexError(PyThesError):
+    '''A thesaurus index line is missing or invalid.'''
+
+
+class MalformedDataError(PyThesError):
+    '''A thesaurus data entry is incomplete or invalid.'''
+
+
+# Backwards-compatible names from the original project.
+ExcPyThes = PyThesError
+ExcIndexLinesCount = IndexLineCountError
+ExcLookupMissmatch = LookupMismatchError
+ExcMalformedIndex = MalformedIndexError
+ExcMalformedData = MalformedDataError
 
 
 class PyThesIndexWarning(RuntimeWarning):
@@ -116,7 +160,7 @@ class PyThesIndexWarning(RuntimeWarning):
 
 class PyThes:
 
-    def __init__(self, thes_filepath, cache_size=256):
+    def __init__(self, thes_filepath: PathInput, cache_size: int = 256) -> None:
         '''Gets from thes_filepath the thesaurus files names
         and loads the index file content as a dictionary of pairs
         { entry: byte_offset_into_data_file }
@@ -137,44 +181,65 @@ class PyThes:
         self._lookup_cache = OrderedDict()
         self._cache_lock = RLock()
 
-        self.idx_path, self.dat_path = self.get_filenames(thes_filepath)
-        self.dat_encoding = self.get_encoding(self.dat_path)
-        if self.idx_path == '':
-            self.index = self.load_index_from_dat(self.dat_path)
+        self.index_path, self.data_path = self.resolve_filenames(thes_filepath)
+        self.idx_path = str(self.index_path) if self.index_path is not None else ''
+        self.dat_path = str(self.data_path)
+        self.dat_encoding = self.get_encoding(self.data_path)
+        if self.index_path is None:
+            self.index = self.load_index_from_dat(self.data_path)
         else:
             try:
-                self.index = self.load_index(self.idx_path)
+                self.index = self.load_index(self.index_path)
                 self.validate_index(self.index)
-            except (ExcIndexLinesCount, ExcLookupMissmatch, ExcMalformedIndex) as error:
+            except (IndexLineCountError, LookupMismatchError, MalformedIndexError) as error:
                 warnings.warn(
                     '{}; rebuilding the index from {!r}'.format(error, self.dat_path),
                     PyThesIndexWarning,
                     stacklevel=2,
                 )
-                self.index = self.load_index_from_dat(self.dat_path)
+                self.index = self.load_index_from_dat(self.data_path)
 
-    def getIndex(self):
+    def getIndex(self) -> Dict[str, int]:
         '''Returns the index dictionary'''
         return self.index
 
     @property
-    def cache_size(self):
+    def cache_size(self) -> int:
         '''Maximum number of cached lookup results; zero means disabled.'''
         return self._cache_size
 
     @staticmethod
-    def normalize_word(word):
+    def normalize_word(word: str) -> str:
         '''Return the canonical, case-insensitive form used by the index.'''
         if not isinstance(word, str):
             raise TypeError('lookup word must be a string')
         return unicodedata.normalize('NFC', word.lower())
 
-    def clear_cache(self):
+    def clear_cache(self) -> None:
         '''Discard all cached lookup hits and misses.'''
         with self._cache_lock:
             self._lookup_cache.clear()
 
-    def get_filenames(self, filepath):
+    @staticmethod
+    def resolve_filenames(filepath: PathInput) -> Tuple[Optional[Path], Path]:
+        '''Resolve the optional index and required data paths.'''
+        supplied_path = Path(filepath).expanduser()
+        extension = supplied_path.suffix.lower()
+        if extension == '.idx':
+            index_path = supplied_path
+            data_path = supplied_path.with_suffix('.dat')
+        elif extension == '.dat':
+            index_path = supplied_path.with_suffix('.idx')
+            data_path = supplied_path
+        else:
+            index_path = supplied_path.with_suffix('.idx')
+            data_path = supplied_path.with_suffix('.dat')
+
+        data_path = Path(abspath(data_path))
+        index_path = Path(abspath(index_path))
+        return (index_path if index_path.is_file() else None), data_path
+
+    def get_filenames(self, filepath: PathInput) -> Tuple[str, str]:
         '''Returns the couple of index, data files names from filepath
 
         The thesaurus consist of two files:
@@ -186,23 +251,10 @@ class PyThes:
             - path to the thesaurus index file
             - path to the thesaurus data file
         '''
-        rootname, ext = splitext(filepath)
-        if ext == '.idx':
-            idx_path = filepath
-            dat_path = rootname + '.dat'
-        elif ext == '.dat':
-            idx_path = rootname + '.idx'
-            dat_path = filepath
-        else:
-            idx_path = rootname + '.idx'
-            dat_path = rootname + '.dat'
-        dat_path = abspath(dat_path)
-        idx_path = abspath(idx_path)
-        if isfile(idx_path) is not True:
-            idx_path = ''
-        return idx_path, dat_path
+        index_path, data_path = self.resolve_filenames(filepath)
+        return (str(index_path) if index_path is not None else ''), str(data_path)
 
-    def lookup(self, word):
+    def lookup(self, word: str) -> Optional[ThesaurusEntry]:
         '''Returns ThesaurusEntry namedtuple related to the word
         fetched from thesaurus data file.
 
@@ -243,7 +295,7 @@ class PyThes:
                     self._lookup_cache.popitem(last=False)
         return result
 
-    def _lookup_uncached(self, word):
+    def _lookup_uncached(self, word: str) -> Optional[ThesaurusEntry]:
         '''Read one already-normalized lookup word from the data file.'''
         try:
             # find word in the index
@@ -252,35 +304,70 @@ class PyThes:
             # not found
             return None
 
-        meanings = ()
-        with open(self.dat_path, 'r', encoding=self.dat_encoding) as dat_f:
+        meanings: Tuple[ThesaurusMeaning, ...] = ()
+        with self.data_path.open('r', encoding=self.dat_encoding) as dat_f:
             dat_f.seek(offset_into_dat)
 
             # grab entry and count of the number of meanings
-            line = dat_f.readline()
-            entry, num_mean = line.split('|')
+            line = dat_f.readline().rstrip('\r\n')
+            entry, separator, num_mean_text = line.rpartition('|')
+            if not separator or not entry:
+                raise MalformedDataError(
+                    'invalid entry header at byte offset {}'.format(offset_into_dat),
+                    path=self.data_path,
+                    offset=offset_into_dat,
+                )
             if self.normalize_word(entry) != word:
-                raise ExcLookupMissmatch('search "{}", get "{}"'.format(word, entry))
-            num_mean = int(num_mean)
+                raise LookupMismatchError(
+                    'search "{}", get "{}"'.format(word, entry),
+                    path=self.data_path,
+                    offset=offset_into_dat,
+                )
+            try:
+                num_mean = int(num_mean_text)
+            except ValueError as error:
+                raise MalformedDataError(
+                    'invalid meaning count for {!r}'.format(entry),
+                    path=self.data_path,
+                    offset=offset_into_dat,
+                ) from error
 
             # get each meaning
             for _ in range(num_mean):
-                mean = dat_f.readline().rstrip('\n').split('|')
+                meaning_line = dat_f.readline()
+                if meaning_line == '':
+                    raise MalformedDataError(
+                        'entry {!r} declares more meanings than remain in the data file'.format(
+                            entry
+                        ),
+                        path=self.data_path,
+                        offset=offset_into_dat,
+                    )
+                mean = meaning_line.rstrip('\r\n').split('|')
+                if len(mean) < 2:
+                    raise MalformedDataError(
+                        'entry {!r} contains an invalid meaning'.format(entry),
+                        path=self.data_path,
+                        offset=offset_into_dat,
+                    )
                 meanings += (Mean(mean[0], mean[1], tuple(mean[2:])),)
 
         return ThesaurusEntry(word, meanings)
 
-    def load_index_from_dat(self, dat_path):
+    def load_index_from_dat(self, dat_path: PathInput) -> Dict[str, int]:
         '''Returns a dictionary of pairs { entry: byte_offset_into_data_file }
         from the thesaurus data file
         '''
         _, _, entries = self._scan_data_entries(dat_path)
         return {self.normalize_word(entry): offset for entry, offset in entries}
 
-    def _scan_data_entries(self, dat_path):
+    def _scan_data_entries(
+        self, dat_path: PathInput
+    ) -> Tuple[bytes, bytes, list[Tuple[str, int]]]:
         '''Return the declaration, newline, and exact binary offsets in `.dat`.'''
+        resolved_path = Path(abspath(Path(dat_path).expanduser()))
         entries = []
-        with open(dat_path, 'rb') as dat_f:
+        with resolved_path.open('rb') as dat_f:
             declaration_line = dat_f.readline()
             if declaration_line.endswith(b'\r\n'):
                 line_ending = b'\r\n'
@@ -299,8 +386,10 @@ class PyThes:
                 try:
                     line = raw_line.decode(self.dat_encoding)
                 except UnicodeError as error:
-                    raise ExcMalformedData(
-                        'cannot decode data line {} in {!r}'.format(line_number, dat_path)
+                    raise MalformedDataError(
+                        'cannot decode data line {} in {!r}'.format(line_number, str(resolved_path)),
+                        path=resolved_path,
+                        line_number=line_number,
                     ) from error
                 entry, separator, num_mean_text = line.rstrip('\r\n').rpartition('|')
                 try:
@@ -313,23 +402,27 @@ class PyThes:
                 entries.append((entry, entry_byte_offset))
                 for _ in range(num_mean):
                     if dat_f.readline() == b'':
-                        raise ExcMalformedData(
+                        raise MalformedDataError(
                             'entry {!r} declares more meanings than remain in {!r}'.format(
-                                entry, dat_path
-                            )
+                                entry, str(resolved_path)
+                            ),
+                            path=resolved_path,
+                            line_number=line_number,
                         )
                     line_number += 1
             if malformed_lines:
                 warnings.warn(
                     'ignored malformed data line(s) {} while rebuilding {!r}'.format(
-                        ', '.join(map(str, malformed_lines)), dat_path
+                        ', '.join(map(str, malformed_lines)), str(resolved_path)
                     ),
                     PyThesIndexWarning,
                     stacklevel=2,
                 )
         return declaration, line_ending, entries
 
-    def regenerate_index(self, destination=None, *, overwrite=False):
+    def regenerate_index(
+        self, destination: Optional[PathInput] = None, *, overwrite: bool = False
+    ) -> Path:
         '''Generate and atomically publish an index from the source `.dat`.
 
         Args:
@@ -342,12 +435,12 @@ class PyThes:
             The absolute :class:`pathlib.Path` of the generated index.
         '''
         destination = Path(abspath(Path(
-            destination if destination is not None else Path(self.dat_path).with_suffix('.idx')
+            destination if destination is not None else self.data_path.with_suffix('.idx')
         ).expanduser()))
         if destination.exists() and not overwrite:
             raise FileExistsError('refusing to overwrite existing index {!r}'.format(str(destination)))
 
-        declaration, line_ending, entries = self._scan_data_entries(self.dat_path)
+        declaration, line_ending, entries = self._scan_data_entries(self.data_path)
         file_descriptor, temporary_name = tempfile.mkstemp(
             prefix='.{}.'.format(destination.name),
             suffix='.tmp',
@@ -381,11 +474,12 @@ class PyThes:
             raise
 
         self.idx_path = str(destination)
+        self.index_path = destination
         self.index = generated_index
         self.clear_cache()
         return destination
 
-    def load_index(self, idx_path):
+    def load_index(self, idx_path: PathInput) -> Dict[str, int]:
         '''Returns the thesaurus index file content as a dictionary of pairs
         { entry: byte_offset_into_data_file }
 
@@ -404,8 +498,10 @@ class PyThes:
             try:
                 idx_size = int(count_line)
             except ValueError as error:
-                raise ExcMalformedIndex(
-                    'missing or invalid entry count on line 2 in {!r}'.format(idx_path)
+                raise MalformedIndexError(
+                    'missing or invalid entry count on line 2 in {!r}'.format(str(idx_path)),
+                    path=idx_path,
+                    line_number=2,
                 ) from error
             cnt = 0  # now parse the remaining lines of the index
             malformed_lines = []
@@ -417,15 +513,20 @@ class PyThes:
                 try:
                     word_idx[self.normalize_word(word)] = int(offset)
                 except ValueError as error:
-                    raise ExcMalformedIndex(
-                        'invalid byte offset on line {} in {!r}'.format(line_number, idx_path)
+                    raise MalformedIndexError(
+                        'invalid byte offset on line {} in {!r}'.format(
+                            line_number, str(idx_path)
+                        ),
+                        path=idx_path,
+                        line_number=line_number,
                     ) from error
                 cnt += 1
             if idx_size != cnt:
-                raise ExcIndexLinesCount(
+                raise IndexLineCountError(
                     'index declares {} entries but contains {} in {!r}'.format(
-                        idx_size, cnt, idx_path
-                    )
+                        idx_size, cnt, str(idx_path)
+                    ),
+                    path=idx_path,
                 )
             if malformed_lines:
                 warnings.warn(
@@ -437,21 +538,23 @@ class PyThes:
                 )
         return word_idx
 
-    def validate_index(self, word_idx):
+    def validate_index(self, word_idx: Dict[str, int]) -> None:
         '''Verify that every index offset points to its named data entry.
 
         External indexes can remain syntactically valid after their data file
         has changed. Validation detects those stale byte offsets before a
         lookup can return the wrong entry or fail unexpectedly.
         '''
-        with open(self.dat_path, 'r', encoding=self.dat_encoding) as dat_f:
+        with self.data_path.open('r', encoding=self.dat_encoding) as dat_f:
             for word, offset in word_idx.items():
                 try:
                     dat_f.seek(offset)
                     line = dat_f.readline().rstrip('\r\n')
                 except (OSError, UnicodeError, ValueError) as error:
-                    raise ExcLookupMissmatch(
-                        'invalid byte offset {} for {!r}'.format(offset, word)
+                    raise LookupMismatchError(
+                        'invalid byte offset {} for {!r}'.format(offset, word),
+                        path=self.data_path,
+                        offset=offset,
                     ) from error
 
                 entry, separator, num_mean = line.rpartition('|')
@@ -460,13 +563,15 @@ class PyThes:
                 except ValueError:
                     valid_count = False
                 if not separator or self.normalize_word(entry) != word or not valid_count:
-                    raise ExcLookupMissmatch(
+                    raise LookupMismatchError(
                         'index entry {!r} at byte offset {} points to {!r}'.format(
                             word, offset, entry
-                        )
+                        ),
+                        path=self.data_path,
+                        offset=offset,
                     )
 
-    def get_encoding(self, thesaurus_file):
+    def get_encoding(self, thesaurus_file: PathInput) -> str:
         '''Returns first line of thesaurus_file as encoding type.
 
         thesaurus_file is a text file where line 1 describes the encoding used.

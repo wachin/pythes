@@ -90,6 +90,35 @@ Use `thesaurus.clear_cache()` when an application needs explicit invalidation.
 Successfully regenerating an index also clears the cache automatically.
 
 
+Stable public primitives
+------------------------
+
+The maintained fork accepts strings and `os.PathLike` objects. New code can
+use the typed path attributes:
+
+```python
+thesaurus.data_path   # pathlib.Path
+thesaurus.index_path  # pathlib.Path | None
+```
+
+The legacy `dat_path` and `idx_path` string attributes remain available.
+Lookup returns an immutable `ThesaurusEntry` containing immutable
+`ThesaurusMeaning` records. They preserve the original tuple field names and
+unpacking behavior while adding descriptive aliases:
+
+```python
+result = thesaurus.lookup("árbol")
+for meaning in result.meanings:
+    print(meaning.part_of_speech, meaning.meaning, meaning.synonyms)
+```
+
+Data and index failures derive from `PyThesError` and use the public classes
+`IndexLineCountError`, `LookupMismatchError`, `MalformedIndexError`, and
+`MalformedDataError`. Errors expose applicable `path`, `line_number`, and
+`offset` context. Original names such as `ExcLookupMissmatch` remain aliases
+for source compatibility.
+
+
 How to get Hunspell thesaurus files
 -----------------------------------
 Thesaurus files are bundled in LibreOffice / OpenOffice Language Packs
