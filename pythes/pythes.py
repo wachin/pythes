@@ -62,8 +62,11 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 '''
-from os.path import abspath, splitext, isfile
 from collections import namedtuple
+import os
+from os.path import abspath, splitext, isfile
+from pathlib import Path
+import tempfile
 import warnings
 
 
@@ -223,18 +226,34 @@ class PyThes:
         '''Returns a dictionary of pairs { entry: byte_offset_into_data_file }
         from the thesaurus data file
         '''
-        word_idx = {}
-        with open(dat_path, 'r', encoding=self.dat_encoding) as dat_f:
-            dat_f.readline()  # skip first line (file encoding)
+        _, _, entries = self._scan_data_entries(dat_path)
+        return {entry.lower(): offset for entry, offset in entries}
+
+    def _scan_data_entries(self, dat_path):
+        '''Return the declaration, newline, and exact binary offsets in `.dat`.'''
+        entries = []
+        with open(dat_path, 'rb') as dat_f:
+            declaration_line = dat_f.readline()
+            if declaration_line.endswith(b'\r\n'):
+                line_ending = b'\r\n'
+            else:
+                line_ending = b'\n'
+            declaration = declaration_line.rstrip(b'\r\n')
             line_number = 1
             malformed_lines = []
             while True:
                 entry_byte_offset = dat_f.tell()
-                line = dat_f.readline()
-                if line == '':
+                raw_line = dat_f.readline()
+                if raw_line == b'':
                     # the end of the file has been reached
                     break
                 line_number += 1
+                try:
+                    line = raw_line.decode(self.dat_encoding)
+                except UnicodeError as error:
+                    raise ExcMalformedData(
+                        'cannot decode data line {} in {!r}'.format(line_number, dat_path)
+                    ) from error
                 entry, separator, num_mean_text = line.rstrip('\r\n').rpartition('|')
                 try:
                     num_mean = int(num_mean_text)
@@ -243,9 +262,9 @@ class PyThes:
                 if not separator or not entry or num_mean < 0:
                     malformed_lines.append(line_number)
                     continue
-                word_idx[entry.lower()] = entry_byte_offset
+                entries.append((entry, entry_byte_offset))
                 for _ in range(num_mean):
-                    if dat_f.readline() == '':
+                    if dat_f.readline() == b'':
                         raise ExcMalformedData(
                             'entry {!r} declares more meanings than remain in {!r}'.format(
                                 entry, dat_path
@@ -260,7 +279,62 @@ class PyThes:
                     PyThesIndexWarning,
                     stacklevel=2,
                 )
-        return word_idx
+        return declaration, line_ending, entries
+
+    def regenerate_index(self, destination=None, *, overwrite=False):
+        '''Generate and atomically publish an index from the source `.dat`.
+
+        Args:
+            destination: Optional output path. Defaults to the `.idx` path next
+                to the loaded `.dat` file.
+            overwrite: Existing files are protected unless this is explicitly
+                set to ``True``.
+
+        Returns:
+            The absolute :class:`pathlib.Path` of the generated index.
+        '''
+        destination = Path(abspath(Path(
+            destination if destination is not None else Path(self.dat_path).with_suffix('.idx')
+        ).expanduser()))
+        if destination.exists() and not overwrite:
+            raise FileExistsError('refusing to overwrite existing index {!r}'.format(str(destination)))
+
+        declaration, line_ending, entries = self._scan_data_entries(self.dat_path)
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix='.{}.'.format(destination.name),
+            suffix='.tmp',
+            dir=str(destination.parent),
+        )
+        try:
+            with os.fdopen(file_descriptor, 'wb') as index_file:
+                index_file.write(declaration + line_ending)
+                index_file.write(str(len(entries)).encode('ascii') + line_ending)
+                for entry, offset in entries:
+                    index_file.write(entry.encode(self.dat_encoding))
+                    index_file.write(b'|' + str(offset).encode('ascii') + line_ending)
+                index_file.flush()
+                os.fsync(index_file.fileno())
+
+            generated_index = self.load_index(temporary_name)
+            self.validate_index(generated_index)
+            if overwrite:
+                os.replace(temporary_name, destination)
+            else:
+                # A hard link publishes the validated temporary file only if
+                # the destination does not already exist. Unlike a separate
+                # existence check followed by replace, this is race-free.
+                os.link(temporary_name, destination)
+                os.unlink(temporary_name)
+        except BaseException:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
+            raise
+
+        self.idx_path = str(destination)
+        self.index = generated_index
+        return destination
 
     def load_index(self, idx_path):
         '''Returns the thesaurus index file content as a dictionary of pairs

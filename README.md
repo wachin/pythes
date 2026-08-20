@@ -45,6 +45,29 @@ it in memory from the `.dat` file. Recoverable corruption is reported with
 losing access to valid thesaurus entries. UTF-8 BOMs, LF, CRLF, and declared
 legacy encodings remain supported without converting the source files.
 
+Applications and validation tools may explicitly persist a reconstructed
+index:
+
+```python
+from pythes import PyThes
+
+thesaurus = PyThes("/path/to/th_es_v2.dat")
+generated_path = thesaurus.regenerate_index()
+```
+
+The method writes atomically and returns an absolute `pathlib.Path`. Existing
+indexes are protected with `FileExistsError`. Replacing one requires an
+explicit request:
+
+```python
+thesaurus.regenerate_index(overwrite=True)
+```
+
+An alternate destination can be supplied as the first argument. The generated
+index preserves the data file's encoding declaration, optional BOM, and LF or
+CRLF convention. It is reloaded and checked against the `.dat` file before it
+replaces the destination.
+
 
 How to get Hunspell thesaurus files
 -----------------------------------

@@ -115,3 +115,59 @@ def test_crlf_data_and_index_preserve_byte_offsets(tmp_path):
     thesaurus = PyThes(path)
 
     assert thesaurus.lookup('árbol') is not None
+
+
+def test_regenerate_index_does_not_overwrite_by_default(tmp_path):
+    path = _write_thesaurus(tmp_path / 'th_test')
+    index_path = path.with_suffix('.idx')
+    original_index = index_path.read_bytes()
+    thesaurus = PyThes(path)
+
+    with pytest.raises(FileExistsError):
+        thesaurus.regenerate_index()
+
+    assert index_path.read_bytes() == original_index
+
+
+@pytest.mark.parametrize(
+    ('encoding', 'bom', 'line_ending'),
+    (
+        ('UTF-8', True, b'\n'),
+        ('ISO8859-1', False, b'\r\n'),
+    ),
+)
+def test_regenerate_missing_index_preserves_source_format_and_offsets(
+    tmp_path, encoding, bom, line_ending
+):
+    path = _write_thesaurus(
+        tmp_path / 'th_test', encoding=encoding, bom=bom, line_ending=line_ending
+    )
+    index_path = path.with_suffix('.idx')
+    index_path.unlink()
+    thesaurus = PyThes(path)
+
+    generated_path = thesaurus.regenerate_index()
+
+    assert generated_path == index_path
+    generated = generated_path.read_bytes()
+    expected_header = encoding.encode('ascii') + line_ending
+    if bom:
+        expected_header = b'\xef\xbb\xbf' + expected_header
+    assert generated.startswith(expected_header + b'1' + line_ending)
+    with path.open('rb') as data_file:
+        data_file.seek(thesaurus.index['árbol'])
+        assert data_file.readline().decode(encoding).startswith('árbol|1')
+    assert PyThes(generated_path).lookup('árbol') is not None
+
+
+def test_regenerate_index_can_explicitly_replace_a_stale_index(tmp_path):
+    path = _write_thesaurus(tmp_path / 'th_test', stale_index=True)
+    index_path = path.with_suffix('.idx')
+    with pytest.warns(PyThesIndexWarning, match='rebuilding the index'):
+        thesaurus = PyThes(path)
+
+    generated_path = thesaurus.regenerate_index(overwrite=True)
+
+    assert generated_path == index_path
+    assert PyThes(generated_path).lookup('árbol') is not None
+    assert not list(tmp_path.glob('.th_test.idx.*.tmp'))

@@ -12,3 +12,6 @@
   rebuild stale or truncated indexes safely in memory.
 - Support index reconstruction from CRLF data and skip isolated malformed data
   headers with a visible warning while preserving valid entries.
+- Add explicit, atomic `.idx` regeneration with exact binary offsets,
+  source-format preservation, validation before publication, and overwrite
+  protection by default.
