@@ -31,6 +31,21 @@ The script will open the `th_it_IT_v2.dat` and `th_it_IT_v2.idx` files
 in the directory path.
 
 
+Index validation and recovery
+-----------------------------
+
+PyThes treats the `.dat` file as the thesaurus source of truth. The `.idx`
+file is optional and is never modified. When an external index is present,
+PyThes validates its declared entry count and verifies that every byte offset
+points to the named data entry.
+
+If the index is missing, truncated, malformed, or stale, PyThes reconstructs
+it in memory from the `.dat` file. Recoverable corruption is reported with
+`PyThesIndexWarning`; applications may log or display that diagnostic without
+losing access to valid thesaurus entries. UTF-8 BOMs, LF, CRLF, and declared
+legacy encodings remain supported without converting the source files.
+
+
 How to get Hunspell thesaurus files
 -----------------------------------
 Thesaurus files are bundled in LibreOffice / OpenOffice Language Packs

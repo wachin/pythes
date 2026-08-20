@@ -99,6 +99,11 @@ class ExcMalformedIndex(ExcPyThes):
     pass
 
 
+class ExcMalformedData(ExcPyThes):
+    '''A thesaurus data entry is incomplete or invalid'''
+    pass
+
+
 class PyThesIndexWarning(RuntimeWarning):
     '''The external index required recovery or contains ignored corruption'''
     pass
@@ -123,7 +128,8 @@ class PyThes:
         else:
             try:
                 self.index = self.load_index(self.idx_path)
-            except (ExcIndexLinesCount, ExcMalformedIndex) as error:
+                self.validate_index(self.index)
+            except (ExcIndexLinesCount, ExcLookupMissmatch, ExcMalformedIndex) as error:
                 warnings.warn(
                     '{}; rebuilding the index from {!r}'.format(error, self.dat_path),
                     PyThesIndexWarning,
@@ -220,17 +226,40 @@ class PyThes:
         word_idx = {}
         with open(dat_path, 'r', encoding=self.dat_encoding) as dat_f:
             dat_f.readline()  # skip first line (file encoding)
-            entry_byte_offset = dat_f.tell()
+            line_number = 1
+            malformed_lines = []
             while True:
+                entry_byte_offset = dat_f.tell()
                 line = dat_f.readline()
                 if line == '':
                     # the end of the file has been reached
                     break
-                entry, num_mean = line.split('|')
+                line_number += 1
+                entry, separator, num_mean_text = line.rstrip('\r\n').rpartition('|')
+                try:
+                    num_mean = int(num_mean_text)
+                except ValueError:
+                    num_mean = -1
+                if not separator or not entry or num_mean < 0:
+                    malformed_lines.append(line_number)
+                    continue
                 word_idx[entry.lower()] = entry_byte_offset
-                for _ in range(int(num_mean)):
-                    dat_f.readline()  # skip description lines
-                entry_byte_offset = dat_f.tell()
+                for _ in range(num_mean):
+                    if dat_f.readline() == '':
+                        raise ExcMalformedData(
+                            'entry {!r} declares more meanings than remain in {!r}'.format(
+                                entry, dat_path
+                            )
+                        )
+                    line_number += 1
+            if malformed_lines:
+                warnings.warn(
+                    'ignored malformed data line(s) {} while rebuilding {!r}'.format(
+                        ', '.join(map(str, malformed_lines)), dat_path
+                    ),
+                    PyThesIndexWarning,
+                    stacklevel=2,
+                )
         return word_idx
 
     def load_index(self, idx_path):
@@ -248,7 +277,13 @@ class PyThes:
         idx_codec = self.get_encoding(idx_path)
         with open(idx_path, 'r', encoding=idx_codec) as idx_f:
             idx_f.readline()  # skip first line (file encoding)
-            idx_size = int(idx_f.readline())
+            count_line = idx_f.readline()
+            try:
+                idx_size = int(count_line)
+            except ValueError as error:
+                raise ExcMalformedIndex(
+                    'missing or invalid entry count on line 2 in {!r}'.format(idx_path)
+                ) from error
             cnt = 0  # now parse the remaining lines of the index
             malformed_lines = []
             for line_number, line in enumerate(idx_f, start=3):
@@ -278,6 +313,35 @@ class PyThes:
                     stacklevel=2,
                 )
         return word_idx
+
+    def validate_index(self, word_idx):
+        '''Verify that every index offset points to its named data entry.
+
+        External indexes can remain syntactically valid after their data file
+        has changed. Validation detects those stale byte offsets before a
+        lookup can return the wrong entry or fail unexpectedly.
+        '''
+        with open(self.dat_path, 'r', encoding=self.dat_encoding) as dat_f:
+            for word, offset in word_idx.items():
+                try:
+                    dat_f.seek(offset)
+                    line = dat_f.readline().rstrip('\r\n')
+                except (OSError, UnicodeError, ValueError) as error:
+                    raise ExcLookupMissmatch(
+                        'invalid byte offset {} for {!r}'.format(offset, word)
+                    ) from error
+
+                entry, separator, num_mean = line.rpartition('|')
+                try:
+                    valid_count = int(num_mean) >= 0
+                except ValueError:
+                    valid_count = False
+                if not separator or entry.lower() != word or not valid_count:
+                    raise ExcLookupMissmatch(
+                        'index entry {!r} at byte offset {} points to {!r}'.format(
+                            word, offset, entry
+                        )
+                    )
 
     def get_encoding(self, thesaurus_file):
         '''Returns first line of thesaurus_file as encoding type.

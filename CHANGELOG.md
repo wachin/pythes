@@ -8,3 +8,7 @@
   from the original `.dat` file, without modifying dictionary files.
 - Add regression coverage for UTF-8, ISO-8859-1, ISO-8859-2, byte offsets,
   BOMs, and malformed indexes.
+- Validate every external index offset against its named `.dat` entry and
+  rebuild stale or truncated indexes safely in memory.
+- Support index reconstruction from CRLF data and skip isolated malformed data
+  headers with a visible warning while preserving valid entries.
