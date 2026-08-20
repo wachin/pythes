@@ -69,6 +69,27 @@ CRLF convention. It is reloaded and checked against the `.dat` file before it
 replaces the destination.
 
 
+Unicode lookup and bounded caching
+----------------------------------
+
+Index keys and lookup words use Unicode NFC normalization after lowercasing.
+This means canonically equivalent input, such as `á` and `a` followed by a
+combining acute accent, resolves to the same thesaurus entry. Meaning and
+synonym text remains as supplied by the source dictionary.
+
+Each `PyThes` instance has a thread-safe LRU cache limited to 256 entries by
+default. Both successful lookups and missing words are cached. The limit is
+configurable and never grows without bound:
+
+```python
+thesaurus = PyThes("/path/to/th_es_v2.dat", cache_size=512)
+thesaurus_without_cache = PyThes("/path/to/th_es_v2.dat", cache_size=0)
+```
+
+Use `thesaurus.clear_cache()` when an application needs explicit invalidation.
+Successfully regenerating an index also clears the cache automatically.
+
+
 How to get Hunspell thesaurus files
 -----------------------------------
 Thesaurus files are bundled in LibreOffice / OpenOffice Language Packs

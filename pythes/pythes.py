@@ -62,11 +62,13 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 '''
-from collections import namedtuple
+from collections import namedtuple, OrderedDict
 import os
 from os.path import abspath, splitext, isfile
 from pathlib import Path
 import tempfile
+from threading import RLock
+import unicodedata
 import warnings
 
 
@@ -114,7 +116,7 @@ class PyThesIndexWarning(RuntimeWarning):
 
 class PyThes:
 
-    def __init__(self, thes_filepath):
+    def __init__(self, thes_filepath, cache_size=256):
         '''Gets from thes_filepath the thesaurus files names
         and loads the index file content as a dictionary of pairs
         { entry: byte_offset_into_data_file }
@@ -123,7 +125,18 @@ class PyThes:
             - root name of files
             - path to the thesaurus index file
             - path to the thesaurus data file
+
+        cache_size limits the per-instance LRU lookup cache. Set it to zero to
+        disable caching.
         '''
+        if isinstance(cache_size, bool) or not isinstance(cache_size, int):
+            raise TypeError('cache_size must be an integer')
+        if cache_size < 0:
+            raise ValueError('cache_size must be zero or greater')
+        self._cache_size = cache_size
+        self._lookup_cache = OrderedDict()
+        self._cache_lock = RLock()
+
         self.idx_path, self.dat_path = self.get_filenames(thes_filepath)
         self.dat_encoding = self.get_encoding(self.dat_path)
         if self.idx_path == '':
@@ -143,6 +156,23 @@ class PyThes:
     def getIndex(self):
         '''Returns the index dictionary'''
         return self.index
+
+    @property
+    def cache_size(self):
+        '''Maximum number of cached lookup results; zero means disabled.'''
+        return self._cache_size
+
+    @staticmethod
+    def normalize_word(word):
+        '''Return the canonical, case-insensitive form used by the index.'''
+        if not isinstance(word, str):
+            raise TypeError('lookup word must be a string')
+        return unicodedata.normalize('NFC', word.lower())
+
+    def clear_cache(self):
+        '''Discard all cached lookup hits and misses.'''
+        with self._cache_lock:
+            self._lookup_cache.clear()
 
     def get_filenames(self, filepath):
         '''Returns the couple of index, data files names from filepath
@@ -196,7 +226,25 @@ class PyThes:
                 syn1_mean - synonym 1 also used to describe the meaning itself 
                 syn2      - synonym 2 for that meaning etc.
         '''
-        word = word.lower()
+        word = self.normalize_word(word)
+        if self.cache_size:
+            with self._cache_lock:
+                if word in self._lookup_cache:
+                    result = self._lookup_cache.pop(word)
+                    self._lookup_cache[word] = result
+                    return result
+
+        result = self._lookup_uncached(word)
+        if self.cache_size:
+            with self._cache_lock:
+                self._lookup_cache[word] = result
+                self._lookup_cache.move_to_end(word)
+                while len(self._lookup_cache) > self.cache_size:
+                    self._lookup_cache.popitem(last=False)
+        return result
+
+    def _lookup_uncached(self, word):
+        '''Read one already-normalized lookup word from the data file.'''
         try:
             # find word in the index
             offset_into_dat = self.index[word]
@@ -211,7 +259,7 @@ class PyThes:
             # grab entry and count of the number of meanings
             line = dat_f.readline()
             entry, num_mean = line.split('|')
-            if entry.lower() != word:
+            if self.normalize_word(entry) != word:
                 raise ExcLookupMissmatch('search "{}", get "{}"'.format(word, entry))
             num_mean = int(num_mean)
 
@@ -227,7 +275,7 @@ class PyThes:
         from the thesaurus data file
         '''
         _, _, entries = self._scan_data_entries(dat_path)
-        return {entry.lower(): offset for entry, offset in entries}
+        return {self.normalize_word(entry): offset for entry, offset in entries}
 
     def _scan_data_entries(self, dat_path):
         '''Return the declaration, newline, and exact binary offsets in `.dat`.'''
@@ -334,6 +382,7 @@ class PyThes:
 
         self.idx_path = str(destination)
         self.index = generated_index
+        self.clear_cache()
         return destination
 
     def load_index(self, idx_path):
@@ -366,7 +415,7 @@ class PyThes:
                     malformed_lines.append(line_number)
                     continue
                 try:
-                    word_idx[word.lower()] = int(offset)
+                    word_idx[self.normalize_word(word)] = int(offset)
                 except ValueError as error:
                     raise ExcMalformedIndex(
                         'invalid byte offset on line {} in {!r}'.format(line_number, idx_path)
@@ -410,7 +459,7 @@ class PyThes:
                     valid_count = int(num_mean) >= 0
                 except ValueError:
                     valid_count = False
-                if not separator or entry.lower() != word or not valid_count:
+                if not separator or self.normalize_word(entry) != word or not valid_count:
                     raise ExcLookupMissmatch(
                         'index entry {!r} at byte offset {} points to {!r}'.format(
                             word, offset, entry

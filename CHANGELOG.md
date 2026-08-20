@@ -15,3 +15,7 @@
 - Add explicit, atomic `.idx` regeneration with exact binary offsets,
   source-format preservation, validation before publication, and overwrite
   protection by default.
+- Normalize index and query words to NFC so canonically equivalent Unicode
+  spellings resolve to the same entry.
+- Add a configurable, thread-safe LRU lookup cache with a fixed upper bound,
+  negative-result caching, explicit clearing, and regeneration invalidation.

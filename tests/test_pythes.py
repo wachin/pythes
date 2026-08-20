@@ -1,4 +1,5 @@
 from pathlib import Path
+import unicodedata
 
 import pytest
 
@@ -14,13 +15,13 @@ def _write_thesaurus(
     stale_index: bool = False,
     truncated_index: bool = False,
     line_ending: bytes = b'\n',
+    entry: str = 'árbol',
 ) -> Path:
     codec = encoding
     header = encoding.encode('ascii') + line_ending
     if bom:
         header = b'\xef\xbb\xbf' + header
 
-    entry = 'árbol'
     body = (
         f'{entry}|1\n'
         '(sustantivo)|planta alta|vegetal\n'
@@ -165,9 +166,74 @@ def test_regenerate_index_can_explicitly_replace_a_stale_index(tmp_path):
     index_path = path.with_suffix('.idx')
     with pytest.warns(PyThesIndexWarning, match='rebuilding the index'):
         thesaurus = PyThes(path)
+    assert thesaurus.lookup('árbol') is not None
+    assert thesaurus._lookup_cache
 
     generated_path = thesaurus.regenerate_index(overwrite=True)
 
     assert generated_path == index_path
+    assert not thesaurus._lookup_cache
     assert PyThes(generated_path).lookup('árbol') is not None
     assert not list(tmp_path.glob('.th_test.idx.*.tmp'))
+
+
+@pytest.mark.parametrize('dictionary_form', ['NFC', 'NFD'])
+def test_lookup_accepts_canonically_equivalent_unicode(tmp_path, dictionary_form):
+    entry = unicodedata.normalize(dictionary_form, 'árbol')
+    path = _write_thesaurus(tmp_path / 'th_test', entry=entry)
+    thesaurus = PyThes(path)
+
+    result = thesaurus.lookup(unicodedata.normalize('NFD', 'ÁRBOL'))
+
+    assert result.word == 'árbol'
+    assert result.mean_tuple[0].main == 'planta alta'
+
+
+def test_lookup_cache_is_lru_bounded_and_caches_misses(tmp_path, monkeypatch):
+    path = _write_thesaurus(tmp_path / 'th_test')
+    thesaurus = PyThes(path, cache_size=2)
+    uncached_lookup = thesaurus._lookup_uncached
+    calls = []
+
+    def counted_lookup(word):
+        calls.append(word)
+        return uncached_lookup(word)
+
+    monkeypatch.setattr(thesaurus, '_lookup_uncached', counted_lookup)
+
+    assert thesaurus.lookup('árbol') is not None
+    assert thesaurus.lookup(unicodedata.normalize('NFD', 'árbol')) is not None
+    assert thesaurus.lookup('missing-one') is None
+    assert thesaurus.lookup('missing-two') is None
+    assert thesaurus.lookup('árbol') is not None
+    assert thesaurus.lookup('ÁRBOL') is not None
+
+    assert calls == ['árbol', 'missing-one', 'missing-two', 'árbol']
+    assert len(thesaurus._lookup_cache) == 2
+
+
+def test_lookup_cache_can_be_cleared_or_disabled(tmp_path, monkeypatch):
+    path = _write_thesaurus(tmp_path / 'th_test')
+    thesaurus = PyThes(path, cache_size=0)
+    uncached_lookup = thesaurus._lookup_uncached
+    calls = []
+
+    def counted_lookup(word):
+        calls.append(word)
+        return uncached_lookup(word)
+
+    monkeypatch.setattr(thesaurus, '_lookup_uncached', counted_lookup)
+    thesaurus.lookup('árbol')
+    thesaurus.lookup('ÁRBOL')
+    thesaurus.clear_cache()
+
+    assert calls == ['árbol', 'árbol']
+    assert not thesaurus._lookup_cache
+
+
+@pytest.mark.parametrize('cache_size', [-1, 1.5, '2'])
+def test_invalid_cache_size_is_rejected(tmp_path, cache_size):
+    path = _write_thesaurus(tmp_path / 'th_test')
+
+    with pytest.raises((TypeError, ValueError)):
+        PyThes(path, cache_size=cache_size)
