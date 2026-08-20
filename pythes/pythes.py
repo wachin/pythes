@@ -64,6 +64,7 @@ SOFTWARE.
 '''
 from os.path import abspath, splitext, isfile
 from collections import namedtuple
+import warnings
 
 
 # The thesaurus entry of a word consists of:
@@ -93,6 +94,16 @@ class ExcLookupMissmatch(ExcPyThes):
     pass
 
 
+class ExcMalformedIndex(ExcPyThes):
+    '''A thesaurus index line is missing or invalid'''
+    pass
+
+
+class PyThesIndexWarning(RuntimeWarning):
+    '''The external index required recovery or contains ignored corruption'''
+    pass
+
+
 class PyThes:
 
     def __init__(self, thes_filepath):
@@ -110,7 +121,15 @@ class PyThes:
         if self.idx_path == '':
             self.index = self.load_index_from_dat(self.dat_path)
         else:
-            self.index = self.load_index(self.idx_path)
+            try:
+                self.index = self.load_index(self.idx_path)
+            except (ExcIndexLinesCount, ExcMalformedIndex) as error:
+                warnings.warn(
+                    '{}; rebuilding the index from {!r}'.format(error, self.dat_path),
+                    PyThesIndexWarning,
+                    stacklevel=2,
+                )
+                self.index = self.load_index_from_dat(self.dat_path)
 
     def getIndex(self):
         '''Returns the index dictionary'''
@@ -231,12 +250,33 @@ class PyThes:
             idx_f.readline()  # skip first line (file encoding)
             idx_size = int(idx_f.readline())
             cnt = 0  # now parse the remaining lines of the index
-            for line in idx_f:
-                word = line.split('|')
-                word_idx[word[0].lower()] = int(word[1])
+            malformed_lines = []
+            for line_number, line in enumerate(idx_f, start=3):
+                word, separator, offset = line.rstrip('\r\n').rpartition('|')
+                if not separator or not word or not offset:
+                    malformed_lines.append(line_number)
+                    continue
+                try:
+                    word_idx[word.lower()] = int(offset)
+                except ValueError as error:
+                    raise ExcMalformedIndex(
+                        'invalid byte offset on line {} in {!r}'.format(line_number, idx_path)
+                    ) from error
                 cnt += 1
             if idx_size != cnt:
-                raise ExcIndexLinesCount()
+                raise ExcIndexLinesCount(
+                    'index declares {} entries but contains {} in {!r}'.format(
+                        idx_size, cnt, idx_path
+                    )
+                )
+            if malformed_lines:
+                warnings.warn(
+                    'ignored malformed index line(s) {} in {!r}'.format(
+                        ', '.join(map(str, malformed_lines)), idx_path
+                    ),
+                    PyThesIndexWarning,
+                    stacklevel=2,
+                )
         return word_idx
 
     def get_encoding(self, thesaurus_file):
@@ -249,7 +289,10 @@ class PyThes:
         '''
         with open(thesaurus_file, 'rb') as f:
             # convert first binary line to string, removing trailing newline
-            encoding_type = f.readline().decode('ascii').rstrip('\n')
+            # UTF-8's optional BOM is common in LibreOffice dictionaries.  It
+            # prefixes the ASCII-compatible encoding declaration, not the
+            # thesaurus content itself.
+            encoding_type = f.readline().decode('utf-8-sig').strip()
         return encoding_type
 
 
